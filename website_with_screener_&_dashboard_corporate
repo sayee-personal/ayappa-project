@@ -1,0 +1,302 @@
+import io
+import zipfile
+import pandas as pd
+import streamlit as st
+import scipy.optimize as optimize
+from datetime import datetime, timedelta
+import plotly.express as px
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import pytz
+from google.cloud import storage
+
+# --- THE MAGIC BULLET FOR CLOUD FIREWALLS ---
+# This library impersonates a real Chrome browser network fingerprint
+from curl_cffi import requests
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+GCP_BUCKET_NAME = "my-bond-screener-bucket"
+
+st.set_page_config(layout="wide", page_title="⚡ QUANT-AI Bond Terminal", page_icon="⚡")
+
+# ==========================================
+# 1. SMART DATE LOGIC
+# ==========================================
+def get_latest_market_date():
+    """Calculates the date of the most recently published NSE Bhavcopy"""
+    tz = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(tz)
+
+    # If it is before 19:00 (7 PM IST), NSE hasn't uploaded today's data yet.
+    if now.hour < 19:
+        target_date = now - timedelta(days=1)
+    else:
+        target_date = now
+
+    # Roll back weekends to Friday
+    if target_date.weekday() == 5: # Saturday
+        target_date -= timedelta(days=1)
+    elif target_date.weekday() == 6: # Sunday
+        target_date -= timedelta(days=2)
+
+    return target_date.strftime("%Y%m%d")
+
+# ==========================================
+# 2. THE LAZY-LOADER DATA ENGINE
+# ==========================================
+def download_and_store_bhavcopy(date_str, gcp_file_name):
+    """Bypasses NSE firewall, downloads the zip, and saves to GCP Bucket"""
+    url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_str}_F_0000.csv.zip"
+
+    # Impersonate Chrome 110 to slip past Akamai WAF completely
+    session = requests.Session(impersonate="chrome110")
+
+    try:
+        # Ping the homepage first to establish realistic browser cookies
+        session.get("https://www.nseindia.com", timeout=10)
+        response = session.get(url, timeout=15)
+
+        if response.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                csv_filename = url.split("/")[-1].replace(".zip", "")
+                with z.open(csv_filename) as f:
+                    csv_data = f.read()
+
+            # Upload to Google Cloud Bucket silently
+            client = storage.Client()
+            bucket = client.bucket(GCP_BUCKET_NAME)
+            blob = bucket.blob(gcp_file_name)
+            blob.upload_from_string(csv_data, content_type="text/csv")
+
+            # Return the dataframe immediately for the current user
+            return pd.read_csv(io.BytesIO(csv_data))
+    except Exception as e:
+        st.error(f"Network bypassed failed: {e}")
+
+    return pd.DataFrame()
+
+# ==========================================
+# 3. CORE PROCESSING (Math & WAF-Bypassed API)
+# ==========================================
+def calculate_ytm(price, face_value, coupon_rate, years_to_maturity, frequency=1):
+    if years_to_maturity <= 0: return 0.0
+    coupon_payment = face_value * (coupon_rate / 100)
+    
+    def bond_price_equation(y):
+        periods = int(years_to_maturity * frequency)
+        if periods == 0: periods = 1
+        pv = sum([(coupon_payment / frequency) / ((1 + y / frequency) ** t) for t in range(1, periods + 1)])
+        pv += face_value / ((1 + y / frequency) ** periods)
+        return pv - price
+        
+    try:
+        return round(optimize.newton(bond_price_equation, 0.08) * 100, 2)
+    except:
+        return None
+
+def fetch_single_bond(isin, ltp, volume):
+    api_url = f"https://api.bondcentral.in/securities/?isin={isin}&page=1&size=10"
+    try:
+        # Use Chrome impersonation here too, just in case Bond Central blocks GCP!
+        res = requests.get(api_url, impersonate="chrome110", timeout=5)
+
+        if res.status_code == 200:
+            raw_json = res.json()
+
+            if 'data' in raw_json and len(raw_json['data']) > 0:
+                bond_info = raw_json['data'][0].get('data', {})
+                raw_ratings = bond_info.get('ratings', [])
+                rating = raw_ratings[0].get('cra_rating', 'Unrated') if raw_ratings else "Unrated"
+                coupon_rate = float(bond_info.get('coupon_rate') or 0.0)
+                face_value = float(bond_info.get('face_value') or 1000.0)
+                maturity_text = bond_info.get('maturity_date', '').split(" ")[0]
+                maturity_date = datetime.strptime(maturity_text, "%Y-%m-%d") if maturity_text else datetime.now()
+                yrs_to_mat = round((maturity_date - datetime.now()).days / 365.25, 2)
+
+                return {
+                    "ISIN": isin, "Issuer": bond_info.get('issuer', 'Unknown Issuer'),
+                    "Rating": rating, "Coupon (%)": coupon_rate,
+                    "Maturity": maturity_date.strftime("%Y-%m-%d"), "Yrs to Mat": yrs_to_mat,
+                    "LTP (₹)": ltp, "Volume": int(volume),
+                    "YTM (%)": calculate_ytm(ltp, face_value, coupon_rate, yrs_to_mat)
+                }
+    except:
+        pass
+    return None
+
+# ==========================================
+# 4. DATA PIPELINE MANAGER
+# ==========================================
+@st.cache_data(ttl=3600)
+def load_all_market_data():
+    latest_date_str = get_latest_market_date()
+
+    file_name = f"bhavcopy_{latest_date_str}.csv"
+    gcs_uri = f"gs://{GCP_BUCKET_NAME}/{file_name}"
+
+    # 1. Attempt to lazy-load the file from the GCP Bucket
+    try:
+        df = pd.read_csv(gcs_uri, low_memory=False)
+    except Exception:
+        # 2. If it fails, it means we are the first user after 7 PM! We must fetch it.
+        st.toast(f"Fetching {latest_date_str} Bhavcopy from NSE...")
+        df = download_and_store_bhavcopy(latest_date_str, file_name)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df.columns = df.columns.str.strip()
+    col_srs = next((c for c in ['SctySrs', 'SERIES'] if c in df.columns), None)
+    col_isin = next((c for c in ['ISIN', 'Isin'] if c in df.columns), None)
+    col_close = next((c for c in ['ClsPric', 'ClsPrc', 'CLOSE'] if c in df.columns), None)
+    col_vol = next((c for c in ['TtlTradgVol', 'TotTrdQty', 'VOLUME'] if c in df.columns), None)
+
+    bond_series = [
+        'N0', 'N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8', 'N9', 'N10',
+        'NA', 'NB', 'NC', 'ND', 'NE', 'NF', 'NG', 'NH', 'NI', 'NJ', 'NK', 'NL',
+        'NM', 'NN', 'NO', 'NP', 'NQ', 'NR', 'NS', 'NT', 'NU', 'NV', 'NW', 'NX',
+        'NY', 'NZ', 'Y0', 'Y1', 'Y2', 'Y3', 'Y4', 'Y5', 'Y6', 'Y7', 'Y8', 'Y9',
+        'YA', 'YB', 'YC', 'YD', 'YE', 'YF', 'YG', 'YH', 'YI', 'YJ', 'YK', 'YL',
+        'YM', 'YN', 'YO', 'YP', 'YQ', 'YR', 'YS', 'YT', 'YU', 'YV', 'YW', 'YX',
+        'YY', 'YZ'
+    ]
+    bonds_df = df[df[col_srs].isin(bond_series)].copy()
+    bonds_df = bonds_df[[col_isin, col_close, col_vol]]
+    bonds_df.columns = ['ISIN', 'LTP', 'VOLUME']
+
+    top_bonds = bonds_df.sort_values(by='VOLUME', ascending=False)
+    screener_results = []
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(fetch_single_bond, row['ISIN'], row['LTP'], row['VOLUME']) for _, row in top_bonds.iterrows()]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                screener_results.append(result)
+
+    return pd.DataFrame(screener_results).sort_values(by='Volume', ascending=False)
+
+# ==========================================
+# 5. UI LAYOUT
+# ==========================================
+st.markdown("## ⚡ QUANT-AI FIXED INCOME TERMINAL")
+
+with st.spinner("Synchronizing market arrays (Fetching from GCP Bucket)..."):
+    master_df = load_all_market_data()
+
+if master_df.empty:
+    st.error("Terminal initialization fault. Check bucket permissions or NSE availability.")
+else:
+    # ------------------------------------------
+    # SIDEBAR: COMPLETE MATRIX FILTERS
+    # ------------------------------------------
+    st.sidebar.markdown("### 🛠️ Universe Filters")
+    st.sidebar.markdown("---")
+
+    all_issuers = sorted(master_df['Issuer'].unique())
+    selected_issuers = st.sidebar.multiselect("Issuer Filter Matrix", all_issuers, default=all_issuers)
+
+    all_ratings = sorted(master_df['Rating'].unique())
+    selected_ratings = st.sidebar.multiselect("Credit Horizon Filters", all_ratings, default=all_ratings)
+
+    st.sidebar.markdown("### 🎚️ Boundary Limits")
+    min_yrs, max_yrs = float(master_df['Yrs to Mat'].min()), float(master_df['Yrs to Mat'].max())
+    slider_yrs = st.sidebar.slider("Maturity Window (Yrs)", min_yrs, max_yrs, (min_yrs, max_yrs))
+
+    valid_ytm = master_df['YTM (%)'].dropna()
+    min_ytm, max_ytm = float(valid_ytm.min()), float(valid_ytm.max()) if not valid_ytm.empty else (0.0, 25.0)
+    slider_ytm = st.sidebar.slider("Yield Range (YTM %)", min_ytm, max_ytm, (min_ytm, max_ytm))
+
+    min_cpn, max_cpn = float(master_df['Coupon (%)'].min()), float(master_df['Coupon (%)'].max())
+    slider_cpn = st.sidebar.slider("Target Coupon Range (%)", min_cpn, max_cpn, (min_cpn, max_cpn))
+
+    min_vol, max_vol = int(master_df['Volume'].min()), int(master_df['Volume'].max())
+    slider_vol = st.sidebar.slider("Liquidity Floor (Volume)", min_vol, max_vol, (min_vol, max_vol))
+
+    filtered_df = master_df[
+        (master_df['Issuer'].isin(selected_issuers)) &
+        (master_df['Rating'].isin(selected_ratings)) &
+        (master_df['Yrs to Mat'].between(slider_yrs[0], slider_yrs[1])) &
+        (master_df['YTM (%)'].between(slider_ytm[0], slider_ytm[1])) &
+        (master_df['Coupon (%)'].between(slider_cpn[0], slider_cpn[1])) &
+        (master_df['Volume'].between(slider_vol[0], slider_vol[1]))
+    ]
+
+    sorted_df = filtered_df.sort_values(by=["YTM (%)", "Volume", "Yrs to Mat"], ascending=[False, False, True])
+
+    # ------------------------------------------
+    # MAIN STAGE: INSIGHT HERO CARDS
+    # ------------------------------------------
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    with m_col1:
+        with st.container(border=True):
+            if not sorted_df.empty:
+                top_yield_row = sorted_df.iloc[0]
+                st.metric("🔥 ALPHA MAX YIELD", f"{top_yield_row['YTM (%)']}%", f"{top_yield_row['ISIN']}")
+            else:
+                st.metric("🔥 ALPHA MAX YIELD", "0.0%", "NO DATA")
+                
+    with m_col2:
+        with st.container(border=True):
+            if not sorted_df.empty:
+                top_vol_row = sorted_df.sort_values(by="Volume", ascending=False).iloc[0]
+                st.metric("👑 LIQUIDITY KING", f"{top_vol_row['Volume']:,} Qty", f"{top_vol_row['ISIN']}")
+            else:
+                st.metric("👑 LIQUIDITY KING", "0", "NO DATA")
+                
+    with m_col3:
+        with st.container(border=True):
+            aaa_pool = sorted_df[sorted_df['Rating'].str.contains("AAA", na=False)]
+            if not aaa_pool.empty:
+                safe_pick = aaa_pool.iloc[0]
+                st.metric("🛡️ MAX SAFETY PICK", f"{safe_pick['YTM (%)']}% YTM", f"{safe_pick['ISIN']} (AAA)")
+            else:
+                st.metric("🛡️ MAX SAFETY PICK", "N/A", "NO ELIGIBLE BONDS")
+                
+    with m_col4:
+        with st.container(border=True):
+            st.metric("📊 RADAR COVERAGE", f"{len(sorted_df)} Selected", f"Out of {len(master_df)} In Universe")
+
+    # ------------------------------------------
+    # MAIN DISPLAY ARCHITECTURE
+    # ------------------------------------------
+    tab1, tab2 = st.tabs(["📈 Market Analytics & Curve Topology", "🔍 Full Asset Screener"])
+
+    with tab1:
+        st.markdown("### Top 10 Liquid In-Market Issues")
+        st.dataframe(master_df.head(10), width='stretch', hide_index=True)
+
+        st.markdown("---")
+        st.markdown("### Volumetric Macro Yield Curve (Top 30 Liquidity Profiling)")
+        plot_df = master_df.head(30).dropna(subset=['YTM (%)'])
+        if not plot_df.empty:
+            fig = px.scatter(
+                plot_df, x="Yrs to Mat", y="YTM (%)", size="Volume", color="Rating",
+                hover_name="ISIN", hover_data=["Issuer", "Coupon (%)", "Rating", "YTM (%)", "Volume"],
+                template="plotly_white", height=500,
+                color_discrete_sequence=px.colors.qualitative.Prism
+            )
+            fig.update_layout(
+                font_family="Inter, sans-serif",
+                xaxis=dict(title="Years to Maturity Profile", showgrid=True, gridcolor='#EFEFEF'),
+                yaxis=dict(title="Yield to Maturity (%)", showgrid=True, gridcolor='#EFEFEF')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Insufficient active vectors to display market shape.")
+
+    with tab2:
+        st.markdown("### Full Macro Screener Matrix")
+        st.markdown("Rank Execution Order: **Yield Premium** -> **Liquidity Volume** -> **Short Maturity Priority**.")
+        st.dataframe(
+            sorted_df,
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Volume": st.column_config.NumberColumn("Volume", format="%d"),
+                "LTP (₹)": st.column_config.NumberColumn("LTP (₹)", format="%.2f"),
+                "YTM (%)": st.column_config.NumberColumn("YTM (%)", format="%.2f%%"),
+                "Coupon (%)": st.column_config.NumberColumn("Coupon (%)", format="%.2f%%"),
+            }
+        )
