@@ -1,0 +1,16 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --force-reinstall -r requirements.txt
+
+# Copy project files
+COPY . .
+
+# Cloud Run injects the PORT environment variable (default 8080)
+ENV PORT=8080
+
+# Run the Strategies Streamlit app
+CMD sh -c "streamlit run 'strategies_for_trading.py' --server.port=${PORT} --server.address=0.0.0.0"
