@@ -267,7 +267,7 @@ h1, h2, h3 {
     gap: 3rem;
 }
 
-/* Glassmorphism Cards */
+/* Glassmorphism Cards Layout */
 .solution-card {
     position: relative;
     background: var(--bg-surface);
@@ -275,8 +275,22 @@ h1, h2, h3 {
     padding: 3rem;
     backdrop-filter: blur(20px);
     border: 1px solid var(--border-color);
-    transition: var(--transition-slow);
     overflow: hidden;
+    
+    /* Native Layout Acceleration and Pre-reveal defaults */
+    opacity: 0;
+    transform: translateY(35px);
+    transition: opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.8s cubic-bezier(0.22, 1, 0.36, 1),
+                background var(--transition-slow),
+                box-shadow var(--transition-slow);
+    will-change: transform, opacity;
+}
+
+/* Class triggered via Intersection Observer */
+.solution-card.revealed {
+    opacity: 1;
+    transform: translateY(0);
 }
 
 .card-border {
@@ -300,7 +314,7 @@ h1, h2, h3 {
 }
 
 .solution-card:hover {
-    transform: translateY(-10px);
+    transform: translateY(-10px) !important; /* Forces hover overrides cleanly post-reveal */
     background: var(--bg-surface-hover);
     box-shadow: 0 20px 40px rgba(0,0,0,0.4), 0 0 40px rgba(124, 58, 237, 0.1);
 }
@@ -415,10 +429,18 @@ footer {
     .nav-links {
         display: none; /* Hide on mobile for simplicity */
     }
+    
     .cursor-glow {
         display: none;
     }
+    
     body {
         cursor: auto;
+    }
+    
+    /* Fallback override for mobile views to safeguard layouts */
+    .solution-card {
+        opacity: 1;
+        transform: translateY(0);
     }
 }

@@ -1,19 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Trading Strategies Backtester (Web Interface)
-
-A Streamlit web application providing five quantitative equity trading 
-strategies built on vectorbt.
-
-Strategies:
-  1. Dual Moving Average Crossover
-  2. RSI Mean Reversion
-  3. Bollinger Bands Breakout
-  4. MACD Momentum
-  5. CCI Breakout (custom indicator)
-
-Requirements:
-  pip install vectorbt yfinance pandas numpy streamlit
-"""
+"""Trading Strategies Backtester (Web Interface)"""
 
 import datetime
 import pandas as pd
@@ -33,7 +19,7 @@ def cci_apply_func(high, low, close, window):
     sma = tp.rolling(window=window).mean()
     mad = tp.rolling(window=window).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
     cci = (tp - sma) / (0.015 * mad)
-    
+
     return cci.to_numpy()
 
 CCI = vbt.IndicatorFactory(
@@ -44,14 +30,13 @@ CCI = vbt.IndicatorFactory(
     output_names=["cci"]
 ).from_apply_func(cci_apply_func)
 
-
-# --- UI Layout ---
+# --- UI ---
 st.title("⚙️ Algorithmic Alpha Engine")
-st.markdown("Automated equity trading backtester. Simulate, validate, and deploy quantitative models.")
+st.markdown("Automated equity trading backtester.")
 
 st.sidebar.header("🛠️ Strategy Selection")
 strategy = st.sidebar.selectbox(
-    "Select Strategy", 
+    "Select Strategy",
     [
         "Dual Moving Average Crossover",
         "RSI Mean Reversion",
@@ -65,109 +50,118 @@ st.sidebar.header("📊 Global Parameters")
 ticker = st.sidebar.text_input("Stock Ticker", "AAPL").strip().upper()
 start_date = st.sidebar.date_input("Start Date", datetime.date(2020, 1, 1))
 end_date = st.sidebar.date_input("End Date", datetime.date.today())
-interval = st.sidebar.selectbox("Interval", ["1d", "1m", "2m", "5m", "15m", "30m", "60m", "90m", "5d", "1wk", "1mo"])
-init_cash = st.sidebar.number_input("Initial Investment ($)", min_value=100.0, value=10000.0)
+interval = st.sidebar.selectbox("Interval", ["1d", "1m", "5m", "1wk", "1mo"])
+init_cash = st.sidebar.number_input("Initial Investment ($)", 100.0, value=10000.0)
 
 st.sidebar.header("⚙️ Strategy Parameters")
 
 if strategy == "Dual Moving Average Crossover":
-    fast_ma_len = st.sidebar.number_input("Fast MA Sessions", min_value=1, value=50)
-    slow_ma_len = st.sidebar.number_input("Slow MA Sessions", min_value=2, value=200)
+    fast_ma_len = st.sidebar.number_input("Fast MA", 1, value=50)
+    slow_ma_len = st.sidebar.number_input("Slow MA", 2, value=200)
 
 elif strategy == "RSI Mean Reversion":
-    rsi_window = st.sidebar.number_input("RSI Lookback Period", min_value=2, value=14)
-    rsi_lower = st.sidebar.number_input("RSI Lower (Oversold/Buy)", min_value=1.0, value=30.0)
-    rsi_upper = st.sidebar.number_input("RSI Upper (Overbought/Sell)", min_value=1.0, value=70.0)
+    rsi_window = st.sidebar.number_input("RSI Window", 2, value=14)
+    rsi_lower = st.sidebar.number_input("RSI Lower", value=30.0)
+    rsi_upper = st.sidebar.number_input("RSI Upper", value=70.0)
 
 elif strategy == "Bollinger Bands Breakout":
-    bb_window = st.sidebar.number_input("BB Period/Lookback", min_value=2, value=20)
-    bb_std = st.sidebar.number_input("BB Standard Deviations", min_value=0.1, value=2.0)
+    bb_window = st.sidebar.number_input("BB Window", 2, value=20)
+    bb_std = st.sidebar.number_input("BB Std", value=2.0)
 
 elif strategy == "MACD Momentum":
-    fast_w = st.sidebar.number_input("MACD Fast Period", min_value=1, value=12)
-    slow_w = st.sidebar.number_input("MACD Slow Period", min_value=2, value=26)
-    signal_w = st.sidebar.number_input("MACD Signal Period", min_value=1, value=9)
+    fast_w = st.sidebar.number_input("MACD Fast", 1, value=12)
+    slow_w = st.sidebar.number_input("MACD Slow", 2, value=26)
+    signal_w = st.sidebar.number_input("MACD Signal", 1, value=9)
 
 elif strategy == "CCI Breakout":
-    cci_window = st.sidebar.number_input("CCI Lookback Period", min_value=2, value=20)
-    cci_upper = st.sidebar.number_input("CCI Entry Threshold", value=100.0)
-    cci_lower = st.sidebar.number_input("CCI Exit Threshold", value=-100.0)
+    cci_window = st.sidebar.number_input("CCI Window", 2, value=20)
+    cci_upper = st.sidebar.number_input("CCI Upper", value=100.0)
+    cci_lower = st.sidebar.number_input("CCI Lower", value=-100.0)
 
-# --- Execution Engine ---
+# --- RUN BACKTEST ---
 if st.sidebar.button("🚀 Run Backtest", type="primary"):
+
     if not ticker:
-        st.error("Please enter a valid ticker.")
+        st.error("Please enter a ticker")
         st.stop()
 
-    st.markdown("---")
-    
-    with st.spinner(f"Fetching market data for {ticker}..."):
-        try:
-            yf_data = vbt.YFData.download(
-                ticker, 
-                start=start_date.strftime('%Y-%m-%d'), 
-                end=end_date.strftime('%Y-%m-%d'), 
-                interval=interval
-            )
-            close = yf_data.get("Close")
-            high = yf_data.get("High")
-            low = yf_data.get("Low")
-        except Exception as e:
-            st.error(f"Failed to fetch data: {e}")
-            st.stop()
+    with st.spinner("Fetching data..."):
+        yf_data = vbt.YFData.download(
+            ticker,
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            interval=interval
+        )
+
+        close = yf_data.get("Close")
+        high = yf_data.get("High")
+        low = yf_data.get("Low")
 
         if close.empty:
-            st.warning("No data returned for the specified parameters.")
+            st.error("No data found")
             st.stop()
 
-    with st.spinner("Calculating signals and simulating portfolio..."):
+    with st.spinner("Running strategy..."):
+
         if strategy == "Dual Moving Average Crossover":
-            fast_ma = vbt.MA.run(close, fast_ma_len)
-            slow_ma = vbt.MA.run(close, slow_ma_len)
-            entries = fast_ma.ma_crossed_above(slow_ma)
-            exits = fast_ma.ma_crossed_below(slow_ma)
-            
+            fast = vbt.MA.run(close, fast_ma_len)
+            slow = vbt.MA.run(close, slow_ma_len)
+            entries = fast.ma_crossed_above(slow)
+            exits = fast.ma_crossed_below(slow)
+
         elif strategy == "RSI Mean Reversion":
             rsi = vbt.RSI.run(close, window=rsi_window)
             entries = rsi.rsi_crossed_below(rsi_lower)
             exits = rsi.rsi_crossed_above(rsi_upper)
-            
+
         elif strategy == "Bollinger Bands Breakout":
-            bbands = vbt.BBANDS.run(close, window=bb_window, alpha=bb_std)
-            entries = bbands.close_crossed_below(bbands.lower)
-            exits = bbands.close_crossed_above(bbands.upper)
-            
+            bb = vbt.BBANDS.run(close, window=bb_window, alpha=bb_std)
+            entries = bb.close_crossed_below(bb.lower)
+            exits = bb.close_crossed_above(bb.upper)
+
         elif strategy == "MACD Momentum":
             macd = vbt.MACD.run(close, fast_window=fast_w, slow_window=slow_w, signal_window=signal_w)
             entries = macd.macd_crossed_above(macd.signal)
             exits = macd.macd_crossed_below(macd.signal)
-            
+
         elif strategy == "CCI Breakout":
-            cci_ind = CCI.run(high, low, close, window=cci_window)
-            entries = cci_ind.cci_crossed_above(cci_upper)
-            exits = cci_ind.cci_crossed_below(cci_lower)
+            cci = CCI.run(high, low, close, window=cci_window)
+            entries = cci.cci_crossed_above(cci_upper)
+            exits = cci.cci_crossed_below(cci_lower)
 
-        portfolio = vbt.Portfolio.from_signals(close, entries, exits, init_cash=init_cash, freq="1D")
+        portfolio = vbt.Portfolio.from_signals(
+            close,
+            entries,
+            exits,
+            init_cash=init_cash,
+            freq="1D"
+        )
 
-    # --- Render Results ---
-    st.subheader(f"Results for {ticker} ({interval})")
-    
+    # --- RESULTS ---
+    st.subheader(f"Results for {ticker}")
+
     stats = portfolio.stats()
-    
+
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Return [%]", f"{stats['Total Return [%]']:.2f}%")
-    with col2:
-        st.metric("Win Rate [%]", f"{stats['Win Rate [%]']:.2f}%")
-    with col3:
-        st.metric("Max Drawdown [%]", f"{stats['Max Drawdown [%]']:.2f}%")
-    with col4:
-        st.metric("Final Value", f"${portfolio.value().iloc[-1]:,.2f}")
-        
-    st.markdown("### Performance Plot")
+    col1.metric("Total Return %", f"{stats['Total Return [%]']:.2f}%")
+    col2.metric("Win Rate %", f"{stats['Win Rate [%]']:.2f}%")
+    col3.metric("Max Drawdown %", f"{stats['Max Drawdown [%]']:.2f}%")
+    col4.metric("Final Value", f"${portfolio.value().iloc[-1]:,.2f}")
+
+    st.markdown("### Performance")
+
     fig = portfolio.plot()
-    # Explicitly sizing to avoid Streamlit warning regressions
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Detailed Metrics")
-    st.dataframe(stats, width="stretch")
+    stats = portfolio.stats()
+
+    # Convert Series → DataFrame
+    stats_df = stats.to_frame(name="Value")
+
+    # Make EVERYTHING Arrow-safe
+    stats_df["Value"] = stats_df["Value"].apply(
+        lambda x: str(x) if isinstance(x, (pd.Timedelta, object)) else x
+    )
+
+    st.dataframe(stats_df, use_container_width=True)
