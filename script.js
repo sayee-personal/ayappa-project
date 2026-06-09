@@ -14,50 +14,50 @@ document.addEventListener("DOMContentLoaded", () => {
     const interactables = document.querySelectorAll('a, button, .solution-card');
     interactables.forEach(item => {
         item.addEventListener('mouseenter', () => {
-            cursorGlow.style.transform = 'translate(-50%, -50%) scale(1.5)';
-            cursorGlow.style.background = 'radial-gradient(circle, rgba(255,255,255,0.06) 0%, rgba(0,0,0,0) 60%)';
+            if (cursorGlow) {
+                cursorGlow.style.transform = 'translate(-50%, -50%) scale(1.5)';
+                cursorGlow.style.background = 'radial-gradient(circle, rgba(255,255,255,0.06) 0%, rgba(0,0,0,0) 60%)';
+            }
         });
         item.addEventListener('mouseleave', () => {
-            cursorGlow.style.transform = 'translate(-50%, -50%) scale(1)';
-            cursorGlow.style.background = 'radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 60%)';
+            if (cursorGlow) {
+                cursorGlow.style.transform = 'translate(-50%, -50%) scale(1)';
+                cursorGlow.style.background = 'radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 60%)';
+            }
         });
     });
 
-    // 2. Scroll Reveal Animations (Intersection Observer)
+    // 2. Scroll Reveal Animations (Intersection Observer Core)
     const observerOptions = {
-        threshold: 0.1,
-        rootMargin: "0px 0px -50px 0px"
+        threshold: 0.05,            // Triggers quickly as soon as the card top cuts into view
+        rootMargin: "0px 0px -40px 0px"
     };
 
     const observer = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
-                entry.target.style.opacity = "1";
-                entry.target.style.transform = "translateY(0)";
-                observer.unobserve(entry.target);
+                entry.target.classList.add('revealed'); // Toggles performance class safely
+                observer.unobserve(entry.target);      // Disconnects observer to free memory
             }
         });
     }, observerOptions);
 
     const cards = document.querySelectorAll('.solution-card');
     cards.forEach((card, index) => {
-        // Initial state before reveal
-        card.style.opacity = "0";
-        card.style.transform = "translateY(40px)";
-        card.style.transition = `all 0.6s cubic-bezier(0.22, 1, 0.36, 1) ${index * 0.15}s`;
-        
+        // Apply staggering delay directly via inline layout values
+        card.style.transitionDelay = `${index * 0.12}s`;
         observer.observe(card);
     });
 
-    // 3. Optional: Subtle Parallax for Background Orbs based on scroll
+    // 3. Subtle Parallax for Background Orbs based on scroll
     const orbs = document.querySelectorAll('.bg-glow');
     if (orbs.length > 0) {
         window.addEventListener('scroll', () => {
             const scrolled = window.scrollY;
             orbs.forEach((orb, i) => {
-                const speed = (i + 1) * 0.2;
+                const speed = (i + 1) * 0.15;
                 orb.style.transform = `translateY(${scrolled * speed}px)`;
             });
-        });
+        }, { passive: true }); // Optimized scroll performance loop
     }
 });

@@ -34,7 +34,7 @@ def run_screener():
     script = 'website_with_screener_&_dashboard_corporate.py'
     port = 8501
     start_streamlit(script, port)
-    return redirect(f"http://localhost:{port}")
+    return redirect(f"https://axiom-screener-1058901886653.us-central1.run.app")
 
 @app.route('/run-strategies')
 def run_strategies():
@@ -42,7 +42,7 @@ def run_strategies():
     script = 'strategies_for_trading.py'
     port = 8502
     start_streamlit(script, port)
-    return redirect(f"http://localhost:{port}")
+    return redirect(f"https://axiom-strategies-1058901886653.us-central1.run.app")
 
 if __name__ == '__main__':
     print("========================================")

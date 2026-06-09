@@ -1,17 +1,12 @@
 import io
-import zipfile
 import pandas as pd
 import streamlit as st
 import scipy.optimize as optimize
-from datetime import datetime, timedelta
+from datetime import datetime
 import plotly.express as px
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import pytz
+import requests
 from google.cloud import storage
-
-# --- THE MAGIC BULLET FOR CLOUD FIREWALLS ---
-# This library impersonates a real Chrome browser network fingerprint
-from curl_cffi import requests
 
 # ==========================================
 # CONFIGURATION
@@ -21,71 +16,18 @@ GCP_BUCKET_NAME = "my-bond-screener-bucket"
 st.set_page_config(layout="wide", page_title="⚡ QUANT-AI Bond Terminal", page_icon="⚡")
 
 # ==========================================
-# 1. SMART DATE LOGIC
+# 1. CORE DATA CALCULATIONS & CONNECTIONS
 # ==========================================
-def get_latest_market_date():
-    """Calculates the date of the most recently published NSE Bhavcopy"""
-    tz = pytz.timezone('Asia/Kolkata')
-    now = datetime.now(tz)
 
-    # If it is before 19:00 (7 PM IST), NSE hasn't uploaded today's data yet.
-    if now.hour < 19:
-        target_date = now - timedelta(days=1)
-    else:
-        target_date = now
-
-    # Roll back weekends to Friday
-    if target_date.weekday() == 5: # Saturday
-        target_date -= timedelta(days=1)
-    elif target_date.weekday() == 6: # Sunday
-        target_date -= timedelta(days=2)
-
-    return target_date.strftime("%Y%m%d")
-
-# ==========================================
-# 2. THE LAZY-LOADER DATA ENGINE
-# ==========================================
-def download_and_store_bhavcopy(date_str, gcp_file_name):
-    """Bypasses NSE firewall, downloads the zip, and saves to GCP Bucket"""
-    url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_str}_F_0000.csv.zip"
-
-    # Impersonate Chrome 110 to slip past Akamai WAF completely
-    session = requests.Session(impersonate="chrome110")
-
-    try:
-        # Ping the homepage first to establish realistic browser cookies
-        session.get("https://www.nseindia.com", timeout=10)
-        response = session.get(url, timeout=15)
-
-        if response.status_code == 200:
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                csv_filename = url.split("/")[-1].replace(".zip", "")
-                with z.open(csv_filename) as f:
-                    csv_data = f.read()
-
-            # Upload to Google Cloud Bucket silently
-            client = storage.Client()
-            bucket = client.bucket(GCP_BUCKET_NAME)
-            blob = bucket.blob(gcp_file_name)
-            blob.upload_from_string(csv_data, content_type="text/csv")
-
-            # Return the dataframe immediately for the current user
-            return pd.read_csv(io.BytesIO(csv_data))
-    except Exception as e:
-        st.error(f"Network bypassed failed: {e}")
-
-    return pd.DataFrame()
-
-# ==========================================
-# 3. CORE PROCESSING (Math & WAF-Bypassed API)
-# ==========================================
 def calculate_ytm(price, face_value, coupon_rate, years_to_maturity, frequency=1):
-    if years_to_maturity <= 0: return 0.0
+    if years_to_maturity <= 0: 
+        return 0.0
     coupon_payment = face_value * (coupon_rate / 100)
     
     def bond_price_equation(y):
         periods = int(years_to_maturity * frequency)
-        if periods == 0: periods = 1
+        if periods == 0: 
+            periods = 1
         pv = sum([(coupon_payment / frequency) / ((1 + y / frequency) ** t) for t in range(1, periods + 1)])
         pv += face_value / ((1 + y / frequency) ** periods)
         return pv - price
@@ -98,12 +40,9 @@ def calculate_ytm(price, face_value, coupon_rate, years_to_maturity, frequency=1
 def fetch_single_bond(isin, ltp, volume):
     api_url = f"https://api.bondcentral.in/securities/?isin={isin}&page=1&size=10"
     try:
-        # Use Chrome impersonation here too, just in case Bond Central blocks GCP!
-        res = requests.get(api_url, impersonate="chrome110", timeout=5)
-
+        res = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if res.status_code == 200:
             raw_json = res.json()
-
             if 'data' in raw_json and len(raw_json['data']) > 0:
                 bond_info = raw_json['data'][0].get('data', {})
                 raw_ratings = bond_info.get('ratings', [])
@@ -111,14 +50,19 @@ def fetch_single_bond(isin, ltp, volume):
                 coupon_rate = float(bond_info.get('coupon_rate') or 0.0)
                 face_value = float(bond_info.get('face_value') or 1000.0)
                 maturity_text = bond_info.get('maturity_date', '').split(" ")[0]
+
                 maturity_date = datetime.strptime(maturity_text, "%Y-%m-%d") if maturity_text else datetime.now()
                 yrs_to_mat = round((maturity_date - datetime.now()).days / 365.25, 2)
 
                 return {
-                    "ISIN": isin, "Issuer": bond_info.get('issuer', 'Unknown Issuer'),
-                    "Rating": rating, "Coupon (%)": coupon_rate,
-                    "Maturity": maturity_date.strftime("%Y-%m-%d"), "Yrs to Mat": yrs_to_mat,
-                    "LTP (₹)": ltp, "Volume": int(volume),
+                    "ISIN": isin, 
+                    "Issuer": bond_info.get('issuer', 'Unknown Issuer'),
+                    "Rating": rating, 
+                    "Coupon (%)": coupon_rate,
+                    "Maturity": maturity_date.strftime("%Y-%m-%d"), 
+                    "Yrs to Mat": yrs_to_mat,
+                    "LTP (₹)": ltp, 
+                    "Volume": int(volume),
                     "YTM (%)": calculate_ytm(ltp, face_value, coupon_rate, yrs_to_mat)
                 }
     except:
@@ -126,24 +70,27 @@ def fetch_single_bond(isin, ltp, volume):
     return None
 
 # ==========================================
-# 4. DATA PIPELINE MANAGER
+# 2. INSTANT GCP BUCKET INGESTION
 # ==========================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800) # Caches fully analyzed output for 30 minutes
 def load_all_market_data():
-    latest_date_str = get_latest_market_date()
+    file_name = "latest_bhavcopy.csv"
+    print(f"[DEBUG] Fetching safe file managed by cron job: {file_name}")
 
-    file_name = f"bhavcopy_{latest_date_str}.csv"
-    gcs_uri = f"gs://{GCP_BUCKET_NAME}/{file_name}"
-
-    # 1. Attempt to lazy-load the file from the GCP Bucket
+    # Explicitly use the storage client instead of passing string URIs to pandas
     try:
-        df = pd.read_csv(gcs_uri, low_memory=False)
-    except Exception:
-        # 2. If it fails, it means we are the first user after 7 PM! We must fetch it.
-        st.toast(f"Fetching {latest_date_str} Bhavcopy from NSE...")
-        df = download_and_store_bhavcopy(latest_date_str, file_name)
-
-    if df.empty:
+        client = storage.Client(project="fresh-geography-498007-b6")
+        bucket = client.bucket(GCP_BUCKET_NAME)
+        blob = bucket.blob(file_name)
+        
+        if not blob.exists():
+            print(f"[DEBUG] Critical Fault: {file_name} not found in bucket.")
+            return pd.DataFrame()
+            
+        csv_bytes = blob.download_as_bytes()
+        df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False)
+    except Exception as e:
+        st.error(f"GCP Storage Read Failure via Native API. Error: {e}")
         return pd.DataFrame()
 
     df.columns = df.columns.str.strip()
@@ -161,6 +108,11 @@ def load_all_market_data():
         'YM', 'YN', 'YO', 'YP', 'YQ', 'YR', 'YS', 'YT', 'YU', 'YV', 'YW', 'YX',
         'YY', 'YZ'
     ]
+    
+    if not col_srs or not col_isin or not col_close or not col_vol:
+        print("[DEBUG] Alignment Error: Missing target market matrix headers.")
+        return pd.DataFrame()
+
     bonds_df = df[df[col_srs].isin(bond_series)].copy()
     bonds_df = bonds_df[[col_isin, col_close, col_vol]]
     bonds_df.columns = ['ISIN', 'LTP', 'VOLUME']
@@ -178,15 +130,15 @@ def load_all_market_data():
     return pd.DataFrame(screener_results).sort_values(by='Volume', ascending=False)
 
 # ==========================================
-# 5. UI LAYOUT
+# 3. UI LAYOUT
 # ==========================================
 st.markdown("## ⚡ QUANT-AI FIXED INCOME TERMINAL")
 
-with st.spinner("Synchronizing market arrays (Fetching from GCP Bucket)..."):
+with st.spinner("Streaming master array from GCP Cloud Bin..."):
     master_df = load_all_market_data()
 
 if master_df.empty:
-    st.error("Terminal initialization fault. Check bucket permissions or NSE availability.")
+    st.error("No active data found in the cloud workspace. Ensure local cron job has executed.")
 else:
     # ------------------------------------------
     # SIDEBAR: COMPLETE MATRIX FILTERS
@@ -236,7 +188,6 @@ else:
                 st.metric("🔥 ALPHA MAX YIELD", f"{top_yield_row['YTM (%)']}%", f"{top_yield_row['ISIN']}")
             else:
                 st.metric("🔥 ALPHA MAX YIELD", "0.0%", "NO DATA")
-                
     with m_col2:
         with st.container(border=True):
             if not sorted_df.empty:
@@ -244,7 +195,6 @@ else:
                 st.metric("👑 LIQUIDITY KING", f"{top_vol_row['Volume']:,} Qty", f"{top_vol_row['ISIN']}")
             else:
                 st.metric("👑 LIQUIDITY KING", "0", "NO DATA")
-                
     with m_col3:
         with st.container(border=True):
             aaa_pool = sorted_df[sorted_df['Rating'].str.contains("AAA", na=False)]
@@ -253,7 +203,6 @@ else:
                 st.metric("🛡️ MAX SAFETY PICK", f"{safe_pick['YTM (%)']}% YTM", f"{safe_pick['ISIN']} (AAA)")
             else:
                 st.metric("🛡️ MAX SAFETY PICK", "N/A", "NO ELIGIBLE BONDS")
-                
     with m_col4:
         with st.container(border=True):
             st.metric("📊 RADAR COVERAGE", f"{len(sorted_df)} Selected", f"Out of {len(master_df)} In Universe")
@@ -265,7 +214,7 @@ else:
 
     with tab1:
         st.markdown("### Top 10 Liquid In-Market Issues")
-        st.dataframe(master_df.head(10), width='stretch', hide_index=True)
+        st.dataframe(master_df.head(10), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### Volumetric Macro Yield Curve (Top 30 Liquidity Profiling)")
@@ -277,6 +226,7 @@ else:
                 template="plotly_white", height=500,
                 color_discrete_sequence=px.colors.qualitative.Prism
             )
+
             fig.update_layout(
                 font_family="Inter, sans-serif",
                 xaxis=dict(title="Years to Maturity Profile", showgrid=True, gridcolor='#EFEFEF'),
@@ -291,7 +241,7 @@ else:
         st.markdown("Rank Execution Order: **Yield Premium** -> **Liquidity Volume** -> **Short Maturity Priority**.")
         st.dataframe(
             sorted_df,
-            width='stretch',
+            use_container_width=True,
             hide_index=True,
             column_config={
                 "Volume": st.column_config.NumberColumn("Volume", format="%d"),
